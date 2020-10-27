@@ -415,30 +415,91 @@ To prevent upstream changes from breaking critical workloads, security scanning 
 This section covers:
 
 * Build a test image
-* Run a functional test script `./test.sh`
+* Run a functional test script `./test.sh` against the test image
 * If the image tests successfully, import the public image to the **baseimages** registry
 
 ### Write automation testing
 
-To gate any upstream content, automated testing is implemented. In this example, a `test.sh`
+To gate any upstream content, automated testing is implemented. In this example, a `test.sh` is provided which checks the `$BACKGROUND_COLOR`. If the test fails, an `EXIT_CODE` of `1` is returned which causes the ACR Task step to fail, ending the task run. The tests can be expanded in any form of tools, including logging results. The gate is managed by a pass/fail response.
 
-Create an ACR Task to import and test the node base image:
+```bash
+if [ ""$(echo $BACKGROUND_COLOR | tr '[:lower:]' '[:upper:]') = 'RED' ]; then
+    echo -e "\e[31mERROR: Invalid Color:\e[0m" ${BACKGROUND_COLOR}
+    EXIT_CODE=1
+else
+  echo -e "\e[32mValidation Complete - No Known Errors\e[0m"
+fi
+exit ${EXIT_CODE}
+```
 
-  ```azurecli
-    az acr task create \
-    --name base-import-node \
-    -f acr-task.yaml \
-    -r $REGISTRY_BASE_ARTIFACTS \
-    --context $GIT_NODE_IMPORT \
-    --git-access-token $(az keyvault secret show \
-                          --vault-name $AKV \
-                          --name github-token \
-                          --query value -o tsv) \
-    --set REGISTRY_FROM_URL=${REGISTRY_PUBLIC_URL}/ \
-    --assign-identity
-  ```
+The `acr-task.yaml` performs the following steps:
 
-Add credentials for our Public Registry
+* Build the test base image using the following dockerfile:
+    ```dockerfile
+    ARG REGISTRY_FROM_URL=
+    FROM ${REGISTRY_FROM_URL}node:15-alpine
+    WORKDIR /test
+    COPY ./test.sh .
+    CMD ./test.sh
+    ```
+* When completed, validate the image by running the container, which runs `./test.sh`
+* Only if successfully completed, run the import steps, which are gated with `when: ['validate-base-image']`
+
+```yaml
+version: v1.1.0
+steps:
+  - id: build-test-base-image
+    # Build off the base image we'll track
+    # Add a test script to do unit test validations
+    # Note: the test validation image isn't saved to the registry
+    # but the task logs captures log validation results
+    build: >
+      --build-arg REGISTRY_FROM_URL={{.Values.REGISTRY_FROM_URL}} 
+      -f ./Dockerfile
+      -t {{.Run.Registry}}/node-import:test
+      .
+  - id: validate-base-image
+    # only continues if node-import:test returns a non-zero code
+    when: ['build-test-base-image']
+    cmd: "{{.Run.Registry}}/node-import:test"
+  - id: pull-base-image
+    # import the public image to base-artifacts
+    # Override the stable tag, 
+    # and create a unique tag to enable rollback
+    # to a previously working image
+    when: ['validate-base-image']
+    cmd: >
+        docker pull {{.Values.REGISTRY_FROM_URL}}node:15-alpine
+  - id: retag-base-image
+    when: ['pull-base-image']
+    cmd: docker tag {{.Values.REGISTRY_FROM_URL}}node:15-alpine {{.Run.Registry}}/node:15-alpine
+  - id: retag-base-image-unique-tag
+    when: ['pull-base-image']
+    cmd: docker tag {{.Values.REGISTRY_FROM_URL}}node:15-alpine {{.Run.Registry}}/node:15-alpine-{{.Run.ID}}
+  - id: push-base-image
+    when: ['retag-base-image', 'retag-base-image-unique-tag']
+    push: 
+    - "{{.Run.Registry}}/node:15-alpine"
+    - "{{.Run.Registry}}/node:15-alpine-{{.Run.ID}}"
+```
+
+Create an ACR Task to import and test the node base image
+
+```azurecli
+  az acr task create \
+  --name base-import-node \
+  -f acr-task.yaml \
+  -r $REGISTRY_BASE_ARTIFACTS \
+  --context $GIT_NODE_IMPORT \
+  --git-access-token $(az keyvault secret show \
+                        --vault-name $AKV \
+                        --name github-token \
+                        --query value -o tsv) \
+  --set REGISTRY_FROM_URL=${REGISTRY_PUBLIC_URL}/ \
+  --assign-identity
+```
+
+Add credentials for our public registry
 
 ```azurecli
 az acr task credential add \
@@ -463,15 +524,19 @@ az keyvault set-policy \
   --secret-permissions get
 ```
 
+Run the import task:
+
 ```azurecli
 az acr task run -n base-import-node -r $REGISTRY_BASE_ARTIFACTS
 ```
-## Troubleshooting
 
-- `./test.sh: Permission denied`
-      ```bash
-      chmod +x ./test.sh
-      ```
+If the task fails due to `./test.sh: Permission denied` assure the script has execution permissions and commit back to the git repo:
+
+```bash
+chmod +x ./test.sh
+```
+
+## Update the hello-world image to build from the gated node image
 
 Add a `AcrPull` token to access the base-artifacts registry
 
@@ -492,8 +557,6 @@ az keyvault secret set \
               --query credentials.passwords[0].value)
 ```
 
-Update the `hello-world` image to pull from the base artifacts registry
-
 Add credentials for our Public Registry
 
 ```azurecli
@@ -512,29 +575,121 @@ Change the REGISTRY_FROM_URL to use the BASE_ARTIFACTS registry
 az acr task update \
   -n hello-world \
   -r $REGISTRY \
+  --set KEYVAULT=$AKV \
   --set REGISTRY_FROM_URL=${REGISTRY_BASE_ARTIFACTS_URL}/ \
   --set ACI=$ACI \
   --set ACI_RG=$ACI_RG
+```
 
+Run the hello-world task to change it's base image dependency
+
+```azurecli
 az acr task run -r $REGISTRY -n hello-world
 ```
 
-#TODO: Log bug on updating existing SET variables clears out previous values
+## Update the base image with a "valid" change
 
-Monitor base image updates
+Open the `Dockerfile` in base-image-node repo
+Change the `BACKGROUND_COLOR` to `Green` to simulate a valid change.
 
-``azurecli
-$REGISTRY=acmerockets
+```Dockerfile
+ARG REGISTRY_NAME=
+FROM ${REGISTRY_NAME}node:15-alpine
+ENV NODE_VERSION 15-alpine
+ENV BACKGROUND_COLOR Green
+```
 
+Commit the change and monitor the sequence of updates
+
+```azurecli
 watch -n1 az acr task list-runs -r $REGISTRY_PUBLIC
+```
+
+Once running, `ctrl+C` and monitor the logs
+
+```azurecli
 az acr task logs -r $REGISTRY_PUBLIC
+```
 
+Once complete, monitor the base-image-import task
+
+```azurecli
 watch -n1 az acr task list-runs -r $REGISTRY_BASE_ARTIFACTS
-az acr task logs -r $REGISTRY_BASE_ARTIFACTS
+```
 
+Once running, `ctrl+C` and monitor the logs
+
+```azurecli
+az acr task logs -r $REGISTRY_BASE_ARTIFACTS
+```
+
+Once complete, monitor the hello-world task
+
+```azurecli
 watch -n1 az acr task list-runs -r $REGISTRY
+```
+
+Once running, `ctrl+C` and monitor the logs
+
+```azurecli
 az acr task logs -r $REGISTRY
 ```
+
+Once complete, view the ACI hello-world image.
+
+```bash
+explorer.exe "http://"$(az container show \
+  --resource-group $ACI_RG \
+  --name ${ACI} \
+  --query ipAddress.ip \
+  --out tsv)
+```
+
+### View the gated workflow
+
+Perform the above steps again, with a background color of red
+
+Open the `Dockerfile` in base-image-node repo
+Change the `BACKGROUND_COLOR` to `Red` to simulate a valid change.
+
+```Dockerfile
+ARG REGISTRY_NAME=
+FROM ${REGISTRY_NAME}node:15-alpine
+ENV NODE_VERSION 15-alpine
+ENV BACKGROUND_COLOR Red
+```
+
+Commit the change and monitor the sequence of updates
+
+```azurecli
+watch -n1 az acr task list-runs -r $REGISTRY_PUBLIC
+```
+
+Once running, `ctrl+C` and monitor the logs
+
+```azurecli
+az acr task logs -r $REGISTRY_PUBLIC
+```
+
+Once complete, monitor the base-image-import task
+
+```azurecli
+watch -n1 az acr task list-runs -r $REGISTRY_BASE_ARTIFACTS
+```
+
+Once running, `ctrl+C` and monitor the logs
+
+```azurecli
+az acr task logs -r $REGISTRY_BASE_ARTIFACTS
+```
+
+At this point, you should see base-import-node fail validation and stop the sequence to publish a hello-world update.
+
+### Publish an update to hello-world
+
+Changes to the hello-world image will continue using the last validated node image.
+
+Any additional changes to the base-node image that pass the gated validations will trigger base-updates to the hello-world image.
 
 ## Cleaning up
 
@@ -546,236 +701,11 @@ az group delete -n $AKV_RG -y
 az group delete -n $ACI_RG -y
 ```
 
-========
-STOPPING POINT
-========
-
-## Image import
-
-Use [image import](container-registry-import-images.md) in your workflows to import Docker images from public registries easily to your Azure container registries. The [az acr import](/cli/azure/acr)
-Basic, manual feature to move/import base images to ACR from multiple public clouds  (other ACR, DH, GCR, quay, etc.)
-
-Import to (or georeplicate to) same region where you'll deploy - "bring the content to the region"
-
-## Maintain base images in separate registry(ies)
-
-"Regardless of the size of the company, you'll likely want to have a separate registry for managing base images. While it's possible to share a registry with multiple development teams, it's difficult to know how each team may work, possibly requiring VNet features, or other registry specific capabilities.
-
-Depending on your workflow, you may want two registries for base images, one for staging and validating base images, and one for storing verified base images ready for use by your dev teams.
-
-Decouple management of base images from consumption by dev teams.
-
-## Adopt tagging scheme for base image updates
-
-See container-registry-image-tag-version.md
-
-* Build images from stable service tags - can continue to receive security patches and framework updates.
-
-## Protect images using Image/tag locking
-
-Support your build and deployment workflows from unintentional image updates.
-
-https://docs.microsoft.com/en-us/azure/container-registry/container-registry-image-lock
-
-* Lock repo from new content
-* Block pulls or deletes
-
-## Automate base image updates
-
-Expanding on basic image import, they should create a process by which they import the base images they depend upon into their corporate registry.
-
-1. Automate base image updates by buffering to a staging registry, tests are run as part of the build process. If the tests succeed, the mirrored image is imported to a base-images repository. Use ACR tasks to automate base artifact validation:
-
-* Pull to staging registry - build both "mirrored" image and "test" image, including test/validation scripts
-* Scan [build image to run a vulnerability scanner such as Aqua]
-* Test [build image to run a test script]
-* If validated, move to base images reg repo
-
-NEED --> Example multistep task to accomplish this? something like
-https://github.com/Azure-Samples/acr-tasks/blob/master/build-test-update-hello-world.yaml or https://github.com/SteveLasker/Presentations/tree/master/demo-scripts/buffering-building-patching
-
-## Trigger downstream app image builds based on base image update
-
-Using ACR Tasks, tracking base image updates in the base reg repo:
-
-Concepts: container-registry-tasks-base-images.md
-
-Walkthroughs: https://docs.microsoft.com/en-us/azure/container-registry/container-registry-tutorial-base-image-update (base in same reg)
-https://docs.microsoft.com/en-us/azure/container-registry/container-registry-tutorial-private-base-image-update (base in separate reg)
-
 ## Next steps
 
-See Sample E2E scenario
-
-https://github.com/SteveLasker/Presentations/tree/master/demo-scripts/buffering-building-patching
-
-========
-
- and your might host copies of certain public images for your organization's deployments.
-
-Dependencies on public content can introduce numerous risks to your organization
- 
-[Intro] Main message is: Use ACR to keep local copies of all artifacts that organization depends on for development and deployments.
- 
-Example: Companies should never base their FROM statements on external registries
- 
-Should mitigate Docker TOS changes but also a best practice
-
-
-## Extra Snippets
-
-**NOTE:** _Many variables are out of sync_
-
-az acr task run -n base-import-node -r $REGISTRY_BASE_ARTIFACTS
-az acr task list-runs -r $REGISTRY_BASE_ARTIFACTS
-
-az role assignment create \
-  --assignee $PRINCIPAL_ID \
-  --scope $(az acr show --name $REGISTRY_BASE_ARTIFACTS --query id --output tsv) \
-  --role AcrPull
-
-az acr task credential add \
-  --name hello-world \
-  --registry $REGISTRY \
-  --login-server $REGISTRY_BASE_ARTIFACTS_URL \
-  --use-identity [system]
-```
-
-```azurecli
-az role assignment create \
-  --assignee $PRINCIPAL_ID \
-  --scope $(az acr show --name ${REGISTRY_BASE_ARTIFACTS} \
-              --query id --output tsv) \
-  --role AcrPull
-```
-
-Create the ACI
-
-```azurecli
-az group create --name $ACI_RG --location $RESOURCE_GROUP_LOCATION
-
-az container create \
-  --resource-group $ACI_RG \
-  --name ${ACI} \
-  --image ${REGISTRY_URL}/hello-world:$HELLO_WORLD_TAG \
-  --registry-username $(az keyvault secret show \
-                        --vault-name $AKV \
-                        --name ${REGISTRY}-user \
-                        --query value -o tsv) \
-  --registry-password $(az keyvault secret show \
-                        --vault-name $AKV \
-                        --name ${REGISTRY}-password \
-                        --query value -o tsv) \
-  --ip-address=public \
-  --ports 80 \
-  -o jsonc
-```
-
-```azurecli
-az acr task create \
-  -n hello-world \
-  -r $REGISTRY \
-  -t hello-world:{{.Run.ID}} \
-  -f acr-task-build.yaml \
-  --set REGISTRY_URL=${REGISTRY_PUBLIC_URL}/ \
-  --set-secret REGISTRY_PUBLIC_USER=$(az keyvault secret show \
-      --vault-name $AKV \
-      --name "registry-${REGISTRY_PUBLIC}-user" \
-      --query value -o tsv) \
-  --set-secret REGISTRY_PUBLIC_PASSWORD=$(az keyvault secret show \
-      --vault-name $AKV \
-      --name registry-${REGISTRY_PUBLIC}-password \
-      --query value -o tsv) \
-  --context $GIT_HELLO_WORLD \
-  --git-access-token $(az keyvault secret show \
-                        --vault-name $AKV \
-                        --name github-token \
-                        --query value -o tsv) \
-  --assign-identity
-```
-
-## Create an ACI Instance
-
-Retrieve the latest tag for the hello-world image
-```azurecli
-HELLO_WORLD_TAG=$(az acr task list-runs \
-  -r $REGISTRY \
-  -n hello-world \
-  -o tsv --query [0].name)
-```
-
-## Import the public image into the base artifacts registry
-
-```azurecli
-az acr import \
-  --name $REGISTRY_BASE_ARTIFACTS \
-  --source ${REGISTRY_PUBLIC_URL}/15-alpine \
-  --image node:15-alpine \
-  --username $(az keyvault secret show \
-                --vault-name $AKV \
-                --name "registry-${REGISTRY_PUBLIC}-user" \
-                --query value -o tsv) \
-  --password $(az keyvault secret show \
-                --vault-name $AKV \
-                --name "registry-${REGISTRY_PUBLIC}-password" \
-                --query value -o tsv) \
-  --force
-  
-  az acr task create \
-  --name base-import \
-  -f acr-task.yaml \
-  -r $REGISTRY_BASE_ARTIFACTS \
-  --context $GIT_BASE_IMAGE_NODE \
-  --git-access-token $(az keyvault secret show \
-                        --vault-name $AKV \
-                        --name github-token \
-                        --query value -o tsv)
-```
-
-## Manually import the updated base image
-
-```azurecli
-az acr import \
-  --name $REGISTRY_BASE_ARTIFACTS \
-  --source ${REGISTRY_PUBLIC_URL}/node:15-alpine \
-  --image node:15-alpine \
-  --username $(az keyvault secret show \
-                --vault-name $AKV \
-                --name public-registry-user \
-                --query value -o tsv) \
-  --password $(az keyvault secret show \
-                --vault-name $AKV \
-                --name public-registry-password \
-                --query value -o tsv) \
-  --force
-```
-
-## Manually update the ACI instance
-
-```azurecli
-HELLO_WORLD_TAG=dau
-az container create \
-  --resource-group $ACI_RG \
-  --name ${ACI} \
-  --image ${REGISTRY_URL}/hello-world:$HELLO_WORLD_TAG \
-  --registry-username=$(az keyvault secret show \
-                        --vault-name $AKV \
-                        --name "aci-pull-user" \
-                        --query value -o tsv) \
-  --registry-password=$(az keyvault secret show \
-                        --vault-name $AKV \
-                        --name "aci-pull-password" \
-                        --query value -o tsv) \
-  --ip-address=public \
-  --ports 80
-```
-## Notes
-
-### Go Templating Issue
-
-"-" is allowed in key name, but you can not get the value through "dot" syntax like "Values.my-name"
-use `index .Values.foo-bar when -'s are in the name
-
+* [Adopt tagging scheme for base image updates](container-registry-image-tag-version.md)
+* [Build images from stable service tags - can continue to receive security patches and framework updates.](container-registry-image-tag-version.md)
+* [Protect images using Image/tag locking](container-registry-image-lock.md)
 
 [acr]:                          https://aka.ms/acr
 [acr-repo-permissions]:         https://aka.ms/acr/repo-permissions
