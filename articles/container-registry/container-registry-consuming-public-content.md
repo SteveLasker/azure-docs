@@ -45,123 +45,163 @@ Consider balancing these two, possibly conflicting goals:
 
 ## Prerequisites
 
-* Create a clone of docker hub for public images.
-  * This allows us simulate a base image update, which would normally be initiated on docker hub.
-* Create a central registry, which will host the base artifacts.
-* Create a development team registry, that will host one more more teams that build and manage images
-  * **Note:** [repository based RBAC (preview)][acr-repo-permissions] is now available, enabling multiple teams to share a single registry, with unique permission sets
+* Create three registries to represent the workflow
+  * A simulated copy of docker hub for public images.
+    * This allows us simulate a base image update, which would normally be initiated on [Docker Hub][docker-hub] or other public registries.
+  * A development team registry, that will host one more more teams that build and manage images.
+    * **Note:** [repository based RBAC (preview)][acr-repo-permissions] is now available, enabling multiple teams to share a single registry, with unique permission sets
+  * A registry to host imported base artifacts.
+* An Azure KeyVault for storing access keys to the registries
+* An [Azure Container Instance][aci] to host the `hello-world` image.
+  
+### Set environment variables
 
-### Set your environment variables
+In this section, we'll configure variables unique to your environment. We follow best practices for placing resources with durable content in their own resource group to minimize accidental deletion, however you can place these in a single resource group if desired.
 
-In this section, we'll configure variables unique to your environment.
+  ```azurecli
+  # Set the three registry names:
+  REGISTRY_PUBLIC=publicregistry
+  REGISTRY_PUBLIC_RG=${REGISTRY_PUBLIC}-rg
+  REGISTRY_PUBLIC_URL=${REGISTRY_PUBLIC}.azurecr.io
 
-Set the three registry names:
+  REGISTRY_BASE_ARTIFACTS=acmebaseartifacts
+  REGISTRY_BASE_ARTIFACTS_RG=${REGISTRY_BASE_ARTIFACTS}-rg
+  REGISTRY_BASE_ARTIFACTS_URL=${REGISTRY_BASE_ARTIFACTS}.azurecr.io
+
+  REGISTRY=acmerockets
+  REGISTRY_RG=${REGISTRY}-rg
+  REGISTRY_URL=${REGISTRY}.azurecr.io
+
+  REGISTRY_DOCKERHUB_URL=docker.io
+
+  RESOURCE_GROUP_LOCATION=eastus
+
+  # Azure KeyVault for storing secrets
+  AKV=acr-task-credentials
+  AKV_RG=${AKV}-rg
+
+  # ACI for hosting the deployed application
+  ACI=hello-world-aci
+  ACI_RG=${ACI}-rg
+  ```
+
+- GIT repositories and token  
+  To simulate your environment, fork each of these into repositories you can mange. Then, update the variables for your forked repositories.
+  Notice `:main` concatenated to the end of the git URLs representing the default repository branch.
+
+  ```azurecli
+  GIT_BASE_IMAGE_NODE=https://github.com/importing-public-content/base-image-node.git#main
+  GIT_NODE_IMPORT=https://github.com/importing-public-content/import-baseimage-node.git#main
+  GIT_HELLO_WORLD=https://github.com/importing-public-content/hello-world.git#main
+  ```
+
+  Establish a Git Token for ACR Tasks to clone and establish git webhooks.
+  See: @DAN, CAN YOU UPDATE TO A REFERENCE FOR REQUIRED PERMISSIONS?
+
+  ```azurecli
+  GIT_TOKEN=<set-git-token-here>
+  ```
+
+- Docker Hub Credentials  
+  To avoid throttling and identify requests, [create a Docker Hub token][docker-hub-tokens]
+  REGISTRY_DOCKERHUB_USER=<yourusername>
+  REGISTRY_DOCKERHUB_PASSWORD=<yourtoken>
+
+
+### Create Resources
+
+- Create the three registries:
+
+  ```azurecli
+  az group create --name $REGISTRY_PUBLIC_RG --location $RESOURCE_GROUP_LOCATION
+  az acr create --resource-group $REGISTRY_PUBLIC_RG --name $REGISTRY_PUBLIC --sku Premium
+
+  az group create --name $REGISTRY_BASE_ARTIFACTS_RG --location $RESOURCE_GROUP_LOCATION
+  az acr create --resource-group $REGISTRY_BASE_ARTIFACTS_RG --name $REGISTRY_BASE_ARTIFACTS --sku Premium
+
+  az group create --name $REGISTRY_RG --location $RESOURCE_GROUP_LOCATION
+  az acr create --resource-group $REGISTRY_RG --name $REGISTRY --sku Premium
+  ```
+
+- Create a KeyVault for secrets
+
+  ```azurecli
+  az group create --name $AKV_RG --location $RESOURCE_GROUP_LOCATION
+  az keyvault create --resource-group $AKV_RG --name $AKV
+  ```
+
+- Create a Docker Hub token  
+  To avoid throttling and identify requests, [create a Docker Hub token][docker-hub-tokens]
+
+  ```azurecli
+  az keyvault secret set \
+  --vault-name $AKV \
+  --name registry-dockerhub-user \
+  --value $REGISTRY_DOCKERHUB_USER
+
+  az keyvault secret set \
+  --vault-name $AKV \
+  --name registry-dockerhub-password \
+  --value $REGISTRY_DOCKERHUB_PASSWORD
+  ```
+
+- Set and Verify a Git token within KeyVault
 
 ```azurecli
-REGISTRY_PUBLIC=publicregistry
-REGISTRY_PUBLIC_RG=${REGISTRY_PUBLIC}-rg
-REGISTRY_PUBLIC_URL=${REGISTRY_PUBLIC}.azurecr.io
-
-REGISTRY_BASE_ARTIFACTS=acmebaseartifacts
-REGISTRY_BASE_ARTIFACTS_RG=${REGISTRY_BASE_ARTIFACTS}-rg
-REGISTRY_BASE_ARTIFACTS_URL=${REGISTRY_BASE_ARTIFACTS}.azurecr.io
-
-REGISTRY=acmerockets
-REGISTRY_RG=${REGISTRY}-rg
-REGISTRY_URL=${REGISTRY}.azurecr.io
-
-RESOURCE_GROUP_LOCATION=eastus
+az keyvault secret set --vault-name $AKV --name github-token --value $GIT_TOKEN
+az keyvault secret show --vault-name $AKV --name github-token --query value -o tsv
 ```
 
-```
-GIT repositories and token
+- Create a Resource Group for an Azure Container Instance
 
-To simulate your environment, fork each of these into repositories you can mange. Then, update the variables for your forked repositories.
-Notice `:main` concatenated to the end of the git URLs representing the default repository branch.
+  ```azurecli
+  az group create --name $ACI_RG --location $RESOURCE_GROUP_LOCATION
+  ```
 
-```azurecli
+### Create public node base image
 
-GIT_BASE_IMAGE_NODE=https://github.com/importing-public-content/base-image-node.git#main
-GIT_NODE_IMPORT=https://github.com/importing-public-content/import-baseimage-node.git#main
-GIT_HELLO_WORLD=https://github.com/importing-public-content/hello-world.git#main
-```
-
-Establish a Git Token for ACR Tasks to clone and establish git webhooks. 
-See: @DAN, CAN YOU UPDATE TO A REFERENCE FOR REQUIRED PERMISSIONS?
-
-```azurecli
-GIT_TOKEN_NAME=import-public-content
-GIT_TOKEN=<set-git-token-here>
-```
-
-Azure KeyVault for storing secrets
-
-```azurecli
-AKV=acr-task-credentials
-AKV_RG=${AKV}-rg
-```
-
-ACI for hosting the deployed application
-
-```azurecli
-ACI=hello-world-aci
-ACI_RG=${ACI}-rg
-```
-
-Create Registries
-
-```azurecli
-az group create --name $REGISTRY_PUBLIC_RG --location $RESOURCE_GROUP_LOCATION
-az acr create --resource-group $REGISTRY_PUBLIC_RG --name $REGISTRY_PUBLIC --sku Premium
-
-az group create --name $REGISTRY_BASE_ARTIFACTS_RG --location $RESOURCE_GROUP_LOCATION
-az acr create --resource-group $REGISTRY_BASE_ARTIFACTS_RG --name $REGISTRY_BASE_ARTIFACTS --sku Premium
-
-az group create --name $REGISTRY_RG --location $RESOURCE_GROUP_LOCATION
-az acr create --resource-group $REGISTRY_RG --name $REGISTRY --sku Premium
-```
-
-Create KeyVault for secrets
-
-```azurecli
-az group create --name $AKV_RG --location $RESOURCE_GROUP_LOCATION
-az keyvault create --resource-group $AKV_RG --name $AKV
-```
-
-Verify KeyVault values
-
-```azurecli
-az keyvault secret set --vault-name $AKV --name $GIT_TOKEN_NAME --value $GIT_TOKEN
-az keyvault secret show --vault-name $AKV --name $GIT_TOKEN_NAME --query value -o tsv
-```
-
-Create a Resource Group for an Azure Container Instance
-
-```azurecli
-az group create --name $ACI_RG --location $RESOURCE_GROUP_LOCATION
-```
-
-## Create public node base image
-
-To simulate the node image on docker hub, create an [ACR Task][acr] to build and maintain the public image. This allows simulating changes by the node image maintainers
-
-#TODO: Add GitHub Public Token
+To simulate the node image on Docker Hub, create an [ACR Task][acr-task] to build and maintain the public image. This allows simulating changes by the node image maintainers.
 
 ```azurecli
 az acr task create \
   --name node-public \
   -r $REGISTRY_PUBLIC \
   -f acr-task.yaml \
-  -t node:{{.Run.ID}} \
-  -t node:15-alpine \
   --context $GIT_BASE_IMAGE_NODE \
   --git-access-token $(az keyvault secret show \
                         --vault-name $AKV \
-                        --name $GIT_TOKEN_NAME \
-                        --query value -o tsv)
+                        --name github-token \
+                        --query value -o tsv) \
+  --set REGISTRY_FROM_URL=${REGISTRY_DOCKERHUB_URL}/ \
+  --assign-identity
 ```
 
-Run the task to generate a build
+Add credentials for Docker Hub
+
+```azurecli
+az acr task credential add \
+  -n node-public \
+  -r $REGISTRY_PUBLIC \
+  --login-server $REGISTRY_DOCKERHUB_URL \
+  -u https://${AKV}.vault.azure.net/secrets/registry-dockerhub-user \
+  -p https://${AKV}.vault.azure.net/secrets/registry-dockerhub-password \
+  --use-identity [system]
+```
+
+Grant access to read values from the KeyVault
+
+```azurecli
+az keyvault set-policy \
+  --name $AKV \
+  --resource-group $AKV_RG \
+  --object-id $(az acr task show \
+                  --name node-public \
+                  --registry $REGISTRY_PUBLIC \
+                  --query identity.principalId --output tsv) \
+  --secret-permissions get
+```
+
+Run the task to generate the `node` image
 
 ```azurecli
 az acr task run -r $REGISTRY_PUBLIC -n node-public
@@ -174,6 +214,8 @@ az acr repository show-tags -n $REGISTRY_PUBLIC --repository node
 ```
 
 ## Create a Token for access to the "public" registry
+
+Using [ACR Tokens][acr-tokens], create access tokens, scoped to `pull`
 
 ```azurecli
 az keyvault secret set \
@@ -217,39 +259,48 @@ az keyvault secret set \
 
 As we're simulating a public registry, which could be docker hub, we provide credentials in the form of docker login within the `acr-task.yaml`. Since the registry is an ACR, we use the token created above. However, this same pattern may be used to pass docker credentials to docker hub.
 
-Wihin the `acr-task.yaml`, we deploy the newly build image to ACI. The resource group was created above. By calling `az container create` with only a difference in the `image:tag`, the same instance is used.
+Within the `acr-task.yaml`, we deploy the newly built image to ACI. The resource group was created above. By calling `az container create` with only a difference in the `image:tag`, the same instance is used.
 
 ```azurecli
 az acr task create \
   -n hello-world \
   -r $REGISTRY \
-  -t hello-world:{{.Run.ID}} \
   -f acr-task.yaml \
   --context $GIT_HELLO_WORLD \
   --git-access-token $(az keyvault secret show \
                         --vault-name $AKV \
-                        --name $GIT_TOKEN_NAME \
+                        --name github-token \
                         --query value -o tsv) \
   --set REGISTRY_FROM_URL=${REGISTRY_PUBLIC_URL}/ \
-  --set-secret REGISTRY_FROM_USER=$(az keyvault secret show \
-      --vault-name $AKV \
-      --name "registry-${REGISTRY_PUBLIC}-user" \
-      --query value -o tsv) \
-  --set-secret REGISTRY_FROM_PASSWORD=$(az keyvault secret show \
-      --vault-name $AKV \
-      --name "registry-${REGISTRY_PUBLIC}-password" \
-      --query value -o tsv) \
-  --set-secret REGISTRY_USER=$(az keyvault secret show \
-      --vault-name $AKV \
-      --name "registry-${REGISTRY}-user" \
-      --query value -o tsv) \
-  --set-secret REGISTRY_PASSWORD=$(az keyvault secret show \
-      --vault-name $AKV \
-      --name "registry-${REGISTRY}-password" \
-      --query value -o tsv) \
+  --set KEYVAULT=$AKV \
   --set ACI=$ACI \
   --set ACI_RG=$ACI_RG \
   --assign-identity
+```
+
+Add credentials for our Public Registry
+
+```azurecli
+az acr task credential add \
+  -n hello-world \
+  -r $REGISTRY \
+  --login-server $REGISTRY_PUBLIC_URL \
+  -u https://${AKV}.vault.azure.net/secrets/registry-${REGISTRY_PUBLIC}-user \
+  -p https://${AKV}.vault.azure.net/secrets/registry-${REGISTRY_PUBLIC}-password \
+  --use-identity [system]
+```
+
+Grant access to read values from the KeyVault
+
+```azurecli
+az keyvault set-policy \
+  --name $AKV \
+  --resource-group $AKV_RG \
+  --object-id $(az acr task show \
+                  --name hello-world \
+                  --registry $REGISTRY \
+                  --query identity.principalId --output tsv) \
+  --secret-permissions get
 ```
 
 The task was assigned a system identity, which is given access to the ACI resource group for permissions to create the instance.
@@ -268,9 +319,10 @@ With the task created, run the task to build/deploy the hello-world image:
 
 ```azurecli
 az acr task run -r $REGISTRY -n hello-world
+watch -n1 az acr task list-runs -r $REGISTRY
 ```
 
-Browse the site
+Once created, browse the site hosting the `hell-world` image.
 
 ```bash
 explorer.exe "http://"$(az container show \
@@ -283,20 +335,21 @@ explorer.exe "http://"$(az container show \
 ## Update the base image with a "bad" change
 
 Open the `Dockerfile` in base-image-node repo
-Change the `BACKGROUND_COLOR` to `Red`:
+Change the `BACKGROUND_COLOR` to `Red` to simulate a change that would break our environment.
 
 ```Dockerfile
 ARG REGISTRY_NAME=
 FROM ${REGISTRY_NAME}node:15-alpine
-ENV NODE_VERSION 9.1-alpine
+ENV NODE_VERSION 15-alpine
 ENV BACKGROUND_COLOR Red
 ```
 
-Commit the change and watch for ACR Tasks to automatically start building:
+Commit the change and watch for ACR Tasks to automatically start building.
+
+Watch for the task to start executing:
 
 ```azurecli
 watch -n1 az acr task list-runs -r $REGISTRY_PUBLIC
-az acr task logs -r $REGISTRY_PUBLIC
 ```
 
 You should eventually see STATUS `Succeeded` based on a TRIGGER of `Commit`:
@@ -307,13 +360,16 @@ RUN ID    TASK      PLATFORM    STATUS     TRIGGER    STARTED               DURA
 ca4       hub-node  linux       Succeeded  Commit     2020-10-24T05:02:29Z  00:00:22
 ```
 
-Type `CTRL-C` to exit the watch command.
+Type `CTRL-C` to exit the watch command, then view the logs for the most recent run:
 
-Watch for ACR Tasks to automatically start the hello-world image:
+```azurecli
+az acr task logs -r $REGISTRY_PUBLIC
+```
+
+Once the node image is completed, `watch` for ACR Tasks to automatically start the hello-world image:
 
 ```azurecli
 watch -n1 az acr task list-runs -r $REGISTRY
-az acr task logs -r $REGISTRY
 ```
 
 You should eventually see STATUS `Succeeded` based on a TRIGGER of `Image Update`
@@ -324,52 +380,84 @@ RUN ID    TASK         PLATFORM    STATUS     TRIGGER       STARTED             
 dau       hello-world  linux       Succeeded  Image Update  2020-10-24T05:08:45Z  00:00:31
 ```
 
-Type `CTRL-C` to exit the watch command.
+Type `CTRL-C` to exit the watch command, then view the logs for the most recent run:
+
+```azurecli
+az acr task logs -r $REGISTRY
+```
+
+Once completed, browse the site hosting the updated `hell-world` image, which should have a red (broken) background.
+
+```bash
+explorer.exe "http://"$(az container show \
+  --resource-group $ACI_RG \
+  --name ${ACI} \
+  --query ipAddress.ip \
+  --out tsv)
+```
 
 ## Checking in
 
-At this point, you've created a hello-world image that is automatically built on git commits, or changes to the base image. While we've built against a base image in ACR, this could be any supported registry. If using Docker Hub, you would have to wait for someone to change the public image.
+At this point, you've created a `hello-world` image that is automatically built on git commits, and changes to the base `node` image. While we've built against a base image in ACR, this could be any supported registry.
 
 ## Stopping red backgrounds
 
-Our next step is to automate the importing of node base image from the public registry to our base artifacts registry.
-As part of the import, we'll stop any red backgrounds from coming through with validation tests
+Automate the importing of the node base image from a public registry to our base artifacts registry. As part of the import, test and stop any red backgrounds from coming through with validation tests
+
+- Build a test image
+- Run a functional test script
+- Only if the image tests successfuly, import the public image to the base images
+- TODO: store an old tag for rollback
+- Explain the `test.sh` script, elaborating on how to add more tests
+
+### Write automation testing
+
+To gate any upstream content, automated testing is implemented. In this example, a `test.sh`
+
+- Create an ACR Task to import and test the node base image:
+
+  ```azurecli
+    az acr task create \
+    --name base-import-node \
+    -f acr-task.yaml \
+    -r $REGISTRY_BASE_ARTIFACTS \
+    --context $GIT_NODE_IMPORT \
+    --git-access-token $(az keyvault secret show \
+                          --vault-name $AKV \
+                          --name github-token \
+                          --query value -o tsv) \
+    --set REGISTRY_FROM_URL=${REGISTRY_PUBLIC_URL}/ \
+    --assign-identity
+  ```
+
+Add credentials for our Public Registry
 
 ```azurecli
-  az acr task create \
-  --name base-import-node \
-  -f acr-task.yaml \
-  -r $REGISTRY_BASE_ARTIFACTS \
-  --context $GIT_NODE_IMPORT \
-  --git-access-token $(az keyvault secret show \
-                        --vault-name $AKV \
-                        --name $GIT_TOKEN_NAME \
-                        --query value -o tsv) \
-  --set REGISTRY_FROM_URL=${REGISTRY_PUBLIC_URL}/ \
-  --set-secret REGISTRY_FROM_USER=$(az keyvault secret show \
-      --vault-name $AKV \
-      --name "registry-${REGISTRY_PUBLIC}-user" \
-      --query value -o tsv) \
-  --set-secret REGISTRY_FROM_PASSWORD=$(az keyvault secret show \
-      --vault-name $AKV \
-      --name "registry-${REGISTRY_PUBLIC}-password" \
-      --query value -o tsv) \
-  --set REGISTRY=$REGISTRY \
-  --assign-identity
+az acr task credential add \
+  -n base-import-node \
+    -r $REGISTRY_BASE_ARTIFACTS \
+  --login-server $REGISTRY_PUBLIC_URL \
+  -u https://${AKV}.vault.azure.net/secrets/registry-${REGISTRY_PUBLIC}-user \
+  -p https://${AKV}.vault.azure.net/secrets/registry-${REGISTRY_PUBLIC}-password \
+  --use-identity [system]
 ```
 
-The task was assigned a system identity, which is given access to the base-artifacts registry for permissions to import the tested base image.
+Grant access to read values from the KeyVault
 
 ```azurecli
-az role assignment create \
-  --assignee $(az acr task show \
-                --name base-import-node \
-                --registry $REGISTRY_BASE_ARTIFACTS \
-                --query identity.principalId --output tsv) \
-  --scope $(az acr show -n $REGISTRY_BASE_ARTIFACTS --query id -o tsv) \
-  --role owner
+az keyvault set-policy \
+  --name $AKV \
+  --resource-group $AKV_RG \
+  --object-id $(az acr task show \
+                  --name base-import-node \
+                  --registry $REGISTRY_BASE_ARTIFACTS \
+                  --query identity.principalId --output tsv) \
+  --secret-permissions get
 ```
 
+```azurecli
+az acr task run -n base-import-node -r $REGISTRY_BASE_ARTIFACTS
+```
 ## Troubleshooting
 
 - `./test.sh: Permission denied`
@@ -398,30 +486,27 @@ az keyvault secret set \
 
 Update the `hello-world` image to pull from the base artifacts registry
 
+Add credentials for our Public Registry
+
+```azurecli
+az acr task credential add \
+  -n hello-world \
+    -r $REGISTRY \
+  --login-server $REGISTRY_BASE_ARTIFACTS_URL \
+  -u https://${AKV}.vault.azure.net/secrets/registry-${REGISTRY_BASE_ARTIFACTS}-user \
+  -p https://${AKV}.vault.azure.net/secrets/registry-${REGISTRY_BASE_ARTIFACTS}-password \
+  --use-identity [system]
+```
+
+Change the REGISTRY_FROM_URL to use the BASE_ARTIFACTS registry
+
 ```azurecli
 az acr task update \
   -n hello-world \
   -r $REGISTRY \
   --set REGISTRY_FROM_URL=${REGISTRY_BASE_ARTIFACTS_URL}/ \
-  --set-secret REGISTRY_FROM_USER=$(az keyvault secret show \
-      --vault-name $AKV \
-      --name "registry-${REGISTRY_BASE_ARTIFACTS}-user" \
-      --query value -o tsv) \
-  --set-secret REGISTRY_FROM_PASSWORD=$(az keyvault secret show \
-      --vault-name $AKV \
-      --name "registry-${REGISTRY_BASE_ARTIFACTS}-password" \
-      --query value -o tsv) \
-  --set-secret REGISTRY_USER=$(az keyvault secret show \
-      --vault-name $AKV \
-      --name "registry-${REGISTRY}-user" \
-      --query value -o tsv) \
-  --set-secret REGISTRY_PASSWORD=$(az keyvault secret show \
-      --vault-name $AKV \
-      --name "registry-${REGISTRY}-password" \
-      --query value -o tsv) \
   --set ACI=$ACI \
   --set ACI_RG=$ACI_RG
-
 
 az acr task run -r $REGISTRY -n hello-world
 ```
@@ -596,7 +681,7 @@ az acr task create \
   --context $GIT_HELLO_WORLD \
   --git-access-token $(az keyvault secret show \
                         --vault-name $AKV \
-                        --name $GIT_TOKEN_NAME \
+                        --name github-token \
                         --query value -o tsv) \
   --assign-identity
 ```
@@ -635,7 +720,7 @@ az acr import \
   --context $GIT_BASE_IMAGE_NODE \
   --git-access-token $(az keyvault secret show \
                         --vault-name $AKV \
-                        --name $GIT_TOKEN_NAME \
+                        --name github-token \
                         --query value -o tsv)
 ```
 
@@ -676,17 +761,26 @@ az container create \
   --ip-address=public \
   --ports 80
 ```
+## Notes
+
+### Go Templating Issue
+
+"-" is allowed in key name, but you can not get the value through "dot" syntax like "Values.my-name"
+use `index .Values.foo-bar when -'s are in the name
+
 
 [acr]:                          https://aka.ms/acr
 [acr-repo-permissions]:         https://aka.ms/acr/repo-permissions
 [acr-task]:                     https://aka.ms/acr/tasks
-[aci]:                          http://aka.ms/aci
+[acr-tokens]:                   https://aka.ms/acr/tokens
+[aci]:                          https://aka.ms/aci
 [alpine-public-image]:          https://hub.docker.com/_/alpine
 [docker-hub]:                   https://hub.docker.com
+[docker-hub-tokens]:            https://hub.docker.com/settings/security
 [gcr]:                          https://cloud.google.com/container-registry
 [ghcr]:                         https://docs.github.com/en/free-pro-team@latest/packages/getting-started-with-github-container-registry/about-github-container-registry
 [helm-charts]:                  https://helm.sh
-[mcr]:                          http://aka.ms/mcr
+[mcr]:                          https://aka.ms/mcr
 [nginx-public-image]:           https://hub.docker.com/_/nginx
 [oci-artifacts]:                https://aka.ms/acr/artifacts
 [oci-consuming-public-content]: https://docs.google.com/document/d/1fxayMznIkszBI9Y2S3KGSyi2hFMwUIwDfn3D2wQcye4/edit?usp=sharing
