@@ -9,7 +9,7 @@ author: stevelas
 
 # How to consume & maintain public content with Azure Container Registry Tasks
 
-An Azure container registry hosts your container images and other [OCI artifacts][oci-artifacts] in a private, authenticated environment. However, your environment may have dependencies on public content such as public container images, [helm charts][helm-charts], [OPA][opa] Policies or other artifacts. For example, you might run [nginx] for service routing or `docker build FROM `[alpine][alpine-public-image] by pulling images directly from Docker Hub or another public registry. As upstream changes occur, this article will explain how to import and maintain these public artifacts.
+An Azure container registry hosts your container images and other [OCI artifacts][oci-artifacts] in a private, authenticated environment. However, your environment may have dependencies on public content such as public container images, [helm charts][helm-charts], [Open Policy Agent (OPA)][opa] policies or other artifacts. For example, you might run [nginx] for service routing or `docker build FROM` [alpine][alpine-public-image] by pulling images directly from Docker Hub or another public registry. As upstream changes occur, this article will explain how to import and maintain these public artifacts.
 
 For more information about the risks introduced by dependencies on public content and best practices see the [OCI Consuming Public Content Blog post][oci-consuming-public-content].
 
@@ -45,12 +45,31 @@ Consider balancing these two, possibly conflicting goals:
 
 The following steps will:
 
-1. Configure unqiue values for your environemnt
+1. Configure unique values for your environment
 1. Simulate a Public Registry
 1. Automate building a hello-world image
 1. Automate deploying to an [Azure Container Instance][aci]
 1. Simulate upstream changes directly to your environment
 1. Create a gated import, that validates upstream changes are appropriate for your environment
+
+![import workflow components](./media/container-registry-consuming-public-content/consuming-public-content-objects.png)
+
+This walk through will:
+
+1. Configure three registries representing:
+   * Simulated Docker Hub (`publicregistry`)to support changing the base image
+   * Team registry (`contoso`) for private images
+   * Company/team shared registry (`baseartifacts`) for imported public content
+2. Configure ACR Tasks to:  
+   * build the simulated public node image
+   * import and validate the public node image to the company/team shared registry
+   * build and deploy the hello-world image
+3. ACR Task definitions, including configurations for:
+4. Collection of registry credentials which can be pointers to KeyVault
+5. Collection of secrets, available within an `acr-task.yaml`, which are pointers to KeyVault
+6. Collection of configured values used within an `acr-task.yaml`.
+7. An Azure KeyVault, securing all secrets
+8. An Azure Container Instance, hosting the hello-world build application
 
 ### Set environment variables
 
@@ -59,8 +78,8 @@ Configure variables unique to your environment. We follow best practices for pla
   ```azurecli
   # Set the three registry names, unique to your environment:
   REGISTRY_PUBLIC=publicregistry
-  REGISTRY_BASE_ARTIFACTS=acmebaseartifacts
-  REGISTRY=acmerockets
+  REGISTRY_BASE_ARTIFACTS=contosobaseartifacts
+  REGISTRY=contoso
 
   # set the location all resources will be created in:
   RESOURCE_GROUP_LOCATION=eastus
@@ -103,11 +122,11 @@ See: @DAN, CAN YOU UPDATE TO A REFERENCE FOR REQUIRED PERMISSIONS?
 GIT_TOKEN=<set-git-token-here>
 ```
 
-- Docker Hub Credentials  
+Docker Hub Credentials  
 To avoid throttling and identify requests, [create a Docker Hub token][docker-hub-tokens]
 
 ```azurecli
-REGISTRY_DOCKERHUB_USER=stevelasker<yourusername>
+REGISTRY_DOCKERHUB_USER=<yourusername>
 REGISTRY_DOCKERHUB_PASSWORD=<yourtoken>
 ```
 
@@ -147,6 +166,7 @@ az keyvault secret set \
 --name registry-dockerhub-password \
 --value $REGISTRY_DOCKERHUB_PASSWORD
 ```
+
 Set and Verify a Git token within KeyVault
 
 ```azurecli
@@ -454,7 +474,7 @@ steps:
     # Note: the test validation image isn't saved to the registry
     # but the task logs captures log validation results
     build: >
-      --build-arg REGISTRY_FROM_URL={{.Values.REGISTRY_FROM_URL}} 
+      --build-arg REGISTRY_FROM_URL={{.Values.REGISTRY_FROM_URL}}
       -f ./Dockerfile
       -t {{.Run.Registry}}/node-import:test
       .
@@ -464,7 +484,7 @@ steps:
     cmd: "{{.Run.Registry}}/node-import:test"
   - id: pull-base-image
     # import the public image to base-artifacts
-    # Override the stable tag, 
+    # Override the stable tag,
     # and create a unique tag to enable rollback
     # to a previously working image
     when: ['validate-base-image']
@@ -478,7 +498,7 @@ steps:
     cmd: docker tag {{.Values.REGISTRY_FROM_URL}}node:15-alpine {{.Run.Registry}}/node:15-alpine-{{.Run.ID}}
   - id: push-base-image
     when: ['retag-base-image', 'retag-base-image-unique-tag']
-    push: 
+    push:
     - "{{.Run.Registry}}/node:15-alpine"
     - "{{.Run.Registry}}/node:15-alpine-{{.Run.ID}}"
 ```
@@ -694,11 +714,11 @@ Any additional changes to the base-node image that pass the gated validations wi
 ## Cleaning up
 
 ```azurecli
-az group delete -n $REGISTRY_RG -y
-az group delete -n $REGISTRY_PUBLIC_RG -y
-az group delete -n $REGISTRY_BASE_ARTIFACTS_RG -y
-az group delete -n $AKV_RG -y
-az group delete -n $ACI_RG -y
+az group delete -n $REGISTRY_RG --no-wait -y
+az group delete -n $REGISTRY_PUBLIC_RG --no-wait -y
+az group delete -n $REGISTRY_BASE_ARTIFACTS_RG --no-wait -y
+az group delete -n $AKV_RG --no-wait -y
+az group delete -n $ACI_RG --no-wait -y
 ```
 
 ## Next steps
@@ -725,4 +745,5 @@ az group delete -n $ACI_RG -y
 [nginx-public-image]:           https://hub.docker.com/_/nginx
 [oci-artifacts]:                https://aka.ms/acr/artifacts
 [oci-consuming-public-content]: https://docs.google.com/document/d/1fxayMznIkszBI9Y2S3KGSyi2hFMwUIwDfn3D2wQcye4/edit?usp=sharing
+[opa]:                          https://www.openpolicyagent.org/
 [quay]:                         https://quay.io
