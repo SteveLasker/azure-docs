@@ -1,10 +1,10 @@
 ---
-title: Restrict network access to PaaS resources - tutorial - Azure portal | Microsoft Docs
+title: Restrict access to PaaS resources - tutorial - Azure portal
 description: In this tutorial, you learn how to limit and restrict network access to Azure resources, such as Azure Storage and Azure SQL Database, with virtual network service endpoints using the Azure portal.
 services: virtual-network
 documentationcenter: virtual-network
-author: jimdial
-manager: jeconnoc
+author: KumudD
+manager: mtillman
 editor: ''
 tags: azure-resource-manager
 Customer intent: I want only resources in a virtual network subnet to access an Azure PaaS resource, such as an Azure Storage account.
@@ -16,7 +16,7 @@ ms.topic: tutorial
 ms.tgt_pltfrm: virtual-network
 ms.workload: infrastructure
 ms.date: 08/23/2018
-ms.author: jdial
+ms.author: kumud
 ---
 
 # Tutorial: Restrict network access to PaaS resources with virtual network service endpoints using the Azure portal
@@ -54,7 +54,9 @@ Log in to the Azure portal at https://portal.azure.com.
    |Location| Select **East US** |
    |Subnet Name| Public|
    |Subnet Address range| 10.0.0.0/24|
+   |DDoS protection| Basic|
    |Service endpoints| Disabled|
+   |Firewall| Disabled|
 
    ![Enter basic information about your virtual network](./media/tutorial-restrict-network-access-to-resources/create-virtual-network.png)
 
@@ -189,13 +191,13 @@ By default, storage accounts accept network connections from clients in any netw
     |Virtual networks|Select **myVirtualNetwork**, under **Virtual networks**|
     |Subnets| Select **Private**, under **Subnets**|
 
-    ![Firewalls and virtual networks](./media/tutorial-restrict-network-access-to-resources/storage-firewalls-and-virtual-networks.png)
+    ![Screenshot shows the Add networks pane where you can enter the specified values.](./media/tutorial-restrict-network-access-to-resources/storage-firewalls-and-virtual-networks.png)
 
 5. Select **Save**.
 6. Close the **Firewalls and virtual networks** box.
 7. Under **SETTINGS** for the storage account, select **Access keys**, as shown in the following picture:
 
-      ![Firewalls and virtual networks](./media/tutorial-restrict-network-access-to-resources/storage-access-key.png)
+      ![Screenshot shows Access keys selected from Settings where you can obtain a key.](./media/tutorial-restrict-network-access-to-resources/storage-access-key.png)
 
 8. Note the **Key** value, as you'll have to manually enter it in a later step when mapping the file share to a drive letter in a VM.
 
