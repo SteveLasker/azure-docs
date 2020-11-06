@@ -273,6 +273,53 @@ Run the **hello-world** task to change its base image dependency:
 ```azurecli-interactive
 az acr task run -r $REGISTRY -n hello-world
 ```
+## View the gated workflow
+
+1. Open the `Dockerfile` in the `base-image-node` repo
+2. Change the `BACKGROUND_COLOR` to `Red` to simulate an invalid change.
+
+```Dockerfile
+ARG REGISTRY_NAME=
+FROM ${REGISTRY_NAME}node:15-alpine
+ENV NODE_VERSION 15-alpine
+ENV BACKGROUND_COLOR Red
+```
+Commit the change and monitor the sequence of updates:
+
+```azurecli-interactive
+watch -n1 az acr task list-runs -r $REGISTRY_PUBLIC -o table
+```
+
+Once running, type **Ctrl+C** and monitor the logs:
+
+```azurecli-interactive
+az acr task logs -r $REGISTRY_PUBLIC
+```
+
+Once complete, monitor the **base-image-import** task:
+
+```azurecli-interactive
+watch -n1 az acr task list-runs -r $REGISTRY_BASE_ARTIFACTS -o table
+```
+
+Once running, type **Ctrl+C** and monitor the logs:
+
+```azurecli-interactive
+az acr task logs -r $REGISTRY_BASE_ARTIFACTS
+```
+
+At this point, you should see the **base-import-node** task fail validation and stop the sequence to publish a `hello-world` update. Output is similar to:
+
+```console
+[...]
+2020/10/30 03:57:39 Launching container with name: validate-base-image
+Validating Image
+NODE_VERSION: 15-alpine
+BACKGROUND_COLOR: Red
+ERROR: Invalid Color: Red
+2020/10/30 03:57:40 Container failed during run: validate-base-image. No retries remaining.
+failed to run step ID: validate-base-image: exit status 1
+```
 
 ## Update the base image with a "valid" change
 
@@ -330,59 +377,6 @@ az container show \
   --name ${ACI} \
   --query ipAddress.ip \
   --out tsv
-```
-
-In your browser, go to the site, which should have a green (valid) background.
-
-### View the gated workflow
-
-Perform the steps in the preceding section again, with a background color of red.
-
-1. Open the `Dockerfile` in the `base-image-node` repo
-1. Change the `BACKGROUND_COLOR` to `Red` to simulate an invalid change.
-
-```Dockerfile
-ARG REGISTRY_NAME=
-FROM ${REGISTRY_NAME}node:15-alpine
-ENV NODE_VERSION 15-alpine
-ENV BACKGROUND_COLOR Red
-```
-
-Commit the change and monitor the sequence of updates:
-
-```azurecli-interactive
-watch -n1 az acr task list-runs -r $REGISTRY_PUBLIC -o table
-```
-
-Once running, type **Ctrl+C** and monitor the logs:
-
-```azurecli-interactive
-az acr task logs -r $REGISTRY_PUBLIC
-```
-
-Once complete, monitor the **base-image-import** task:
-
-```azurecli-interactive
-watch -n1 az acr task list-runs -r $REGISTRY_BASE_ARTIFACTS -o table
-```
-
-Once running, type **Ctrl+C** and monitor the logs:
-
-```azurecli-interactive
-az acr task logs -r $REGISTRY_BASE_ARTIFACTS
-```
-
-At this point, you should see the **base-import-node** task fail validation and stop the sequence to publish a `hello-world` update. Output is similar to:
-
-```console
-[...]
-2020/10/30 03:57:39 Launching container with name: validate-base-image
-Validating Image
-NODE_VERSION: 15-alpine
-BACKGROUND_COLOR: Red
-ERROR: Invalid Color: Red
-2020/10/30 03:57:40 Container failed during run: validate-base-image. No retries remaining.
-failed to run step ID: validate-base-image: exit status 1
 ```
 
 ### Publish an update to `hello-world`
